@@ -50,9 +50,9 @@ You can use either the HTTPS or SSH url. Grab it and paste it in the GitHub Sync
 
 ![](screenshots/new-settings-page.png)
 
-Done. Try clicking the Sync button now - it should work.
+After setting the URL, click **Connect** in settings once. This verifies the remote and gives git a chance to prompt for authentication before your first sync.
 
-The first time may prompt you to authenticate if you haven't, or it may ask you to configure git with your email and name.
+Done. Try clicking the Sync button now - it should work.
 
 ### Optional
 
@@ -70,4 +70,3 @@ The Node API used by this plugin works with any remote host, but I use GitHub so
 Mobile support could come in the future depending on how much I need it myself.
 
 Follow my stuff at https://kevin.gd/
-

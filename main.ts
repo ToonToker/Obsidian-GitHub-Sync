@@ -12,6 +12,7 @@ interface GHSyncSettings {
 	syncinterval: number;
 	isSyncOnLoad: boolean;
 	checkStatusOnLoad: boolean;
+	lastConnectionStatus: string;
 }
 
 const DEFAULT_SETTINGS: GHSyncSettings = {
@@ -20,6 +21,7 @@ const DEFAULT_SETTINGS: GHSyncSettings = {
 	syncinterval: 0,
 	isSyncOnLoad: false,
 	checkStatusOnLoad: true,
+	lastConnectionStatus: 'Not connected',
 }
 
 
@@ -27,25 +29,69 @@ export default class GHSyncPlugin extends Plugin {
 
 	settings: GHSyncSettings;
 
+	private createGitClient(): SimpleGit {
+		simpleGitOptions = {
+			//@ts-ignore
+			baseDir: this.app.vault.adapter.getBasePath(),
+			binary: this.settings.gitLocation + "git",
+			maxConcurrentProcesses: 6,
+			trimmed: false,
+		};
+		git = simpleGit(simpleGitOptions);
+		return git;
+	}
+
+	private async configureRemote(remote: string) {
+		const client = this.createGitClient();
+		const remotes = await client.getRemotes(true);
+		const origin = remotes.find((entry) => entry.name === 'origin');
+
+		if (!origin) {
+			await client.addRemote('origin', remote);
+			return;
+		}
+
+		if (origin.refs.fetch !== remote || origin.refs.push !== remote) {
+			await client.remote(['set-url', 'origin', remote]);
+		}
+	}
+
+	async ConnectToRemote() {
+		const remote = this.settings.remoteURL.trim();
+		if (!remote) {
+			new Notice('GitHub Sync: Add a remote URL in settings before connecting.', 10000);
+			return;
+		}
+
+		new Notice('GitHub Sync: Connecting to remote...');
+
+		try {
+			const client = this.createGitClient();
+			await client.status();
+			await this.configureRemote(remote);
+			await client.fetch('origin');
+			this.settings.lastConnectionStatus = `Connected to ${remote}`;
+			await this.saveSettings();
+			new Notice('GitHub Sync: Connected. Authentication is now set up for sync.');
+		} catch (e) {
+			this.settings.lastConnectionStatus = `Connection failed: ${String(e)}`;
+			await this.saveSettings();
+			new Notice(`GitHub Sync: Could not connect to remote. ${String(e)}`, 10000);
+		}
+	}
+
 	async SyncNotes()
 	{
 		new Notice("Syncing to GitHub remote")
 
 		const remote = this.settings.remoteURL.trim();
 
-		simpleGitOptions = {
-			//@ts-ignore
-		    baseDir: this.app.vault.adapter.getBasePath(),
-		    binary: this.settings.gitLocation + "git",
-		    maxConcurrentProcesses: 6,
-		    trimmed: false,
-		};
-		git = simpleGit(simpleGitOptions);
+		const client = this.createGitClient();
 
 		let os = require("os");
 		let hostname = os.hostname();
 
-		let statusResult = await git.status().catch((e) => {
+		let statusResult = await client.status().catch((e) => {
 			new Notice("Vault is not a Git repo or git binary cannot be found.", 10000);
 			return; })
 
@@ -59,7 +105,7 @@ export default class GHSyncPlugin extends Plugin {
 		// git commit -m hostname-date-time
 		if (!clean) {
 			try {
-				await git
+				await client
 		    		.add("./*")
 		    		.commit(msg);
 		    } catch (e) {
@@ -70,19 +116,20 @@ export default class GHSyncPlugin extends Plugin {
 			new Notice("Working branch clean");
 		}
 
-		// configure remote
 		try {
-			await git.removeRemote('origin').catch((e) => { new Notice(e); });
-			await git.addRemote('origin', remote).catch((e) => { new Notice(e); });
-		}
-		catch (e) {
+			await this.configureRemote(remote);
+		} catch (e) {
 			new Notice(e);
 			return;
 		}
 		// check if remote url valid by fetching
 		try {
-			await git.fetch();
+			await client.fetch('origin');
+			this.settings.lastConnectionStatus = `Connected to ${remote}`;
+			await this.saveSettings();
 		} catch (e) {
+			this.settings.lastConnectionStatus = `Connection failed: ${String(e)}`;
+			await this.saveSettings();
 			new Notice(e + "\nGitHub Sync: Invalid remote URL.", 10000);
 			return;
 		}
@@ -93,13 +140,13 @@ export default class GHSyncPlugin extends Plugin {
 		// git pull origin main
 	    try {
 	    	//@ts-ignore
-	    	await git.pull('origin', 'main', { '--no-rebase': null }, (err, update) => {
+	    	await client.pull('origin', 'main', { '--no-rebase': null }, (err, update) => {
 	      		if (update) {
 					new Notice("GitHub Sync: Pulled " + update.summary.changes + " changes");
 	      		}
 	   		})
 	    } catch (e) {
-	    	let conflictStatus = await git.status().catch((e) => { new Notice(e, 10000); return; });
+	    	let conflictStatus = await client.status().catch((e) => { new Notice(e, 10000); return; });
     		let conflictMsg = "Merge conflicts in:";
 	    	//@ts-ignore
 			for (let c of conflictStatus.conflicted)
@@ -120,7 +167,7 @@ export default class GHSyncPlugin extends Plugin {
 		// git push origin main
 	    if (!clean) {
 		    try {
-		    	git.push('origin', 'main', ['-u']);
+		    	client.push('origin', 'main', ['-u']);
 		    	new Notice("GitHub Sync: Pushed on " + msg);
 		    } catch (e) {
 		    	new Notice(e, 10000);
@@ -132,19 +179,12 @@ export default class GHSyncPlugin extends Plugin {
 	{
 		// check status
 		try {
-			simpleGitOptions = {
-				//@ts-ignore
-			    baseDir: this.app.vault.adapter.getBasePath(),
-			    binary: this.settings.gitLocation + "git",
-			    maxConcurrentProcesses: 6,
-			    trimmed: false,
-			};
-			git = simpleGit(simpleGitOptions);
+			const client = this.createGitClient();
 
 			//check for remote changes
 			// git branch --set-upstream-to=origin/main main
-			await git.branch({'--set-upstream-to': 'origin/main'});
-			let statusUponOpening = await git.fetch().status();
+			await client.branch({'--set-upstream-to': 'origin/main'});
+			let statusUponOpening = await client.fetch().status();
 			if (statusUponOpening.behind > 0)
 			{
 				// Automatically sync if needed
@@ -237,7 +277,7 @@ class GHSyncSettingTab extends PluginSettingTab {
 
 		const howto = containerEl.createEl("div", { cls: "howto" });
 		howto.createEl("div", { text: "How to use this plugin", cls: "howto_title" });
-		howto.createEl("small", { text: "Grab your GitHub repository's HTTPS or SSH url and paste it into the settings here. If you're not authenticated, the first sync with this plugin should prompt you to authenticate. If you've already setup SSH on your device with GitHub, you won't need to authenticate - just paste your repo's SSH url into the settings here.", cls: "howto_text" });
+		howto.createEl("small", { text: "Grab your GitHub repository's HTTPS or SSH url and paste it into the settings here, then use Connect repository to authenticate before your first sync.", cls: "howto_text" });
 		howto.createEl("br");
         const linkEl = howto.createEl('p');
         linkEl.createEl('span', { text: 'See the ' });
@@ -246,7 +286,7 @@ class GHSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Remote URL')
-			.setDesc('')
+			.setDesc('Set the repository this vault should sync with.')
 			.addText(text => text
 				.setPlaceholder('')
 				.setValue(this.plugin.settings.remoteURL)
@@ -254,7 +294,17 @@ class GHSyncSettingTab extends PluginSettingTab {
 					this.plugin.settings.remoteURL = value;
 					await this.plugin.saveSettings();
 				})
-        	.inputEl.addClass('my-plugin-setting-text'));
+	        	.inputEl.addClass('my-plugin-setting-text'));
+
+		new Setting(containerEl)
+			.setName('Connect repository')
+			.setDesc(`Authenticate and verify access before syncing. Status: ${this.plugin.settings.lastConnectionStatus}`)
+			.addButton((button) => button
+				.setButtonText('Connect')
+				.onClick(async () => {
+					await this.plugin.ConnectToRemote();
+					this.display();
+				}));
 
 		new Setting(containerEl)
 			.setName('git binary location')
